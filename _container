@@ -1,0 +1,894 @@
+#compdef container
+
+# Copyright 2026 Pétur Ingi Egilsson <petur@ingi.dk>
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# zsh completion for Apple's container CLI (https://github.com/apple/container).
+# Written against release 1.5.0.
+#
+# Container IDs, images, networks, volumes, machines, DNS domains and registry
+# logins are completed live from the container system service; when the service
+# isn't running those simply complete nothing.
+
+# --- dynamic values --------------------------------------------------------
+
+# Containers, described by state and image. Arguments are compadd options
+# (_arguments inserts its own right after an action's function name, before
+# any arguments written in the spec), so the state filter comes from
+# $_container_state, set by the wrappers below.
+(( $+functions[__container_containers] )) ||
+__container_containers() {
+  local want=${_container_state:-all} line
+  local -a rows fields ids
+
+  rows=( ${(f)"$(_call_program containers $_container_bin list --all 2>/dev/null)"} )
+  for line in ${rows[2,-1]}; do
+    # ID IMAGE OS ARCH STATE ...; the first five columns are never empty
+    fields=( ${=line} )
+    case $want in
+      (running) [[ $fields[5] == running ]] || continue ;;
+      (stopped) [[ $fields[5] == running ]] && continue ;;
+    esac
+    ids+=( "${fields[1]//:/\\:}:$fields[5], $fields[2]" )
+  done
+
+  _describe -t containers "${${want:#all}:+$want }container" ids "$@"
+}
+
+(( $+functions[__container_running_containers] )) ||
+__container_running_containers() {
+  local _container_state=running
+  __container_containers "$@"
+}
+
+(( $+functions[__container_stopped_containers] )) ||
+__container_stopped_containers() {
+  local _container_state=stopped
+  __container_containers "$@"
+}
+
+# Names printed by `container <subcommand> list --quiet`.
+# usage: __container_names <tag> <description> <subcommand> [compadd-options...]
+(( $+functions[__container_names] )) ||
+__container_names() {
+  local tag=$1 descr=$2 sub=$3 expl
+  shift 3
+  local -a names
+  names=( ${(f)"$(_call_program $tag $_container_bin ${=sub} list --quiet 2>/dev/null)"} )
+  _wanted $tag expl $descr compadd "$@" -a names
+}
+
+(( $+functions[__container_images] )) ||
+__container_images() { __container_names images image image "$@" }
+
+(( $+functions[__container_networks] )) ||
+__container_networks() { __container_names networks network network "$@" }
+
+(( $+functions[__container_volumes] )) ||
+__container_volumes() { __container_names volumes volume volume "$@" }
+
+(( $+functions[__container_machines] )) ||
+__container_machines() { __container_names machines 'container machine' machine "$@" }
+
+(( $+functions[__container_dns_domains] )) ||
+__container_dns_domains() { __container_names domains 'DNS domain' 'system dns' "$@" }
+
+(( $+functions[__container_registries] )) ||
+__container_registries() { __container_names registries registry registry "$@" }
+
+# --- argument formats ------------------------------------------------------
+
+# `container:path` or a local path, as accepted by `container copy`.
+(( $+functions[__container_copy_path] )) ||
+__container_copy_path() {
+  if compset -P '*:'; then
+    _message -e paths 'path in container'
+  else
+    _alternative \
+      'containers:container:__container_containers -qS:' \
+      'files:local path:_files'
+  fi
+}
+
+# --volume: `host-path:container-path` or `volume-name:container-path`.
+(( $+functions[__container_volume_spec] )) ||
+__container_volume_spec() {
+  if compset -P '*:'; then
+    _message -e paths 'path in container'
+  else
+    _alternative \
+      'volumes:volume:__container_volumes -qS:' \
+      'files:host path:_files'
+  fi
+}
+
+# --publish-socket: `host-path:container-path`.
+(( $+functions[__container_socket_spec] )) ||
+__container_socket_spec() {
+  if compset -P '*:'; then
+    _message -e paths 'socket path in container'
+  else
+    _files
+  fi
+}
+
+(( $+functions[__container_mount_spec] )) ||
+__container_mount_spec() {
+  _values -s , 'mount option' \
+    'type[mount type]:type:(bind virtiofs tmpfs volume)' \
+    '(src)source[host path or volume name]:source:_files' \
+    '(source)src[host path or volume name]:source:_files' \
+    '(dst target)destination[path in container]:path in container: ' \
+    '(destination target)dst[path in container]:path in container: ' \
+    '(destination dst)target[path in container]:path in container: ' \
+    '(ro)readonly[mount read-only]' \
+    '(readonly)ro[mount read-only]' \
+    'size[tmpfs size]:size: ' \
+    'mode[tmpfs mode]:mode: '
+}
+
+(( $+functions[__container_ulimit] )) ||
+__container_ulimit() {
+  local expl
+  if compset -P '*='; then
+    _message -e limits 'soft[:hard] limit'
+  else
+    _wanted ulimits expl 'resource limit' compadd -qS= \
+      core cpu data fsize locks memlock msgqueue nice nofile nproc rss \
+      rtprio rttime sigpending stack
+  fi
+}
+
+(( $+functions[__container_machine_settings] )) ||
+__container_machine_settings() {
+  _values -w setting \
+    'cpus[number of virtual CPUs]:number: ' \
+    'memory[memory allocation (e.g. 2G)]:size: ' \
+    'home-mount[home directory mount option]:mode:(ro rw none)' \
+    'virtualization[enable nested virtualization]:enabled:(true false)' \
+    'kernel[custom kernel binary (empty resets to default)]:kernel:_files'
+}
+
+# --- subcommand tables -----------------------------------------------------
+
+# Sets reply to the 'name:description' list for the group whose functions are
+# named <prefix>_<name>.
+(( $+functions[__container_commands] )) ||
+__container_commands() {
+  case $1 in
+    (_container) reply=(
+      'clean:clean one or more running containers'
+      'copy:copy files/folders between a container and the local filesystem'
+      'create:create a new container'
+      'delete:delete one or more containers'
+      'exec:run a new command in a running container'
+      "export:export a container's filesystem as a tar archive"
+      'inspect:display information about one or more containers'
+      'kill:kill or signal one or more running containers'
+      'list:list containers'
+      'logs:fetch container logs'
+      'run:run a container'
+      'start:start a container'
+      'stats:display resource usage statistics for containers'
+      'stop:stop one or more running containers'
+      'prune:remove all stopped containers'
+      'build:build an image from a Dockerfile or Containerfile'
+      'image:manage images'
+      'registry:manage registry logins'
+      'machine:manage container machines'
+      'volume:manage container volumes'
+      'builder:manage an image builder instance'
+      'network:manage container networks'
+      'system:manage system components'
+      'help:show subcommand help information'
+    ) ;;
+    (_container_image) reply=(
+      'delete:delete one or more images'
+      'inspect:display information about one or more images'
+      'list:list images'
+      'load:load images from an OCI compatible tar archive'
+      'prune:remove unused or all images'
+      'pull:pull an image'
+      'push:push an image'
+      'save:save one or more images as an OCI compatible tar archive'
+      'tag:create a new reference for an existing image'
+    ) ;;
+    (_container_registry) reply=(
+      'login:log in to a registry'
+      'logout:log out from a registry'
+      'list:list image registry logins'
+    ) ;;
+    (_container_machine) reply=(
+      'create:create a new container machine and boot it'
+      'delete:delete a container machine'
+      'inspect:display detailed information about a container machine'
+      'list:list container machines'
+      'logs:fetch container machine logs'
+      'run:run a command or shell in a container machine, booting it if necessary'
+      'set:set container machine configuration values'
+      'set-default:set the default container machine'
+      'stop:stop a running container machine'
+    ) ;;
+    (_container_volume) reply=(
+      'create:create a new volume'
+      'delete:delete one or more volumes'
+      'list:list volumes'
+      'inspect:display information about one or more volumes'
+      'prune:remove volumes with no container references'
+    ) ;;
+    (_container_builder) reply=(
+      'start:start the builder container'
+      'status:display the builder container status'
+      'stop:stop the builder container'
+      'delete:delete the builder container'
+    ) ;;
+    (_container_network) reply=(
+      'create:create a new network'
+      'delete:delete one or more networks'
+      'list:list networks'
+      'inspect:display information about one or more networks'
+      'prune:remove networks with no container connections'
+    ) ;;
+    (_container_system) reply=(
+      'df:show disk usage for images, containers, and volumes'
+      'dns:manage local DNS domains'
+      'kernel:manage the default kernel configuration'
+      'logs:fetch system logs for container services'
+      'property:manage system property values'
+      'start:start container services'
+      'status:show the status of container services and system-wide information'
+      'stop:stop all container services'
+      'version:show version information'
+    ) ;;
+    (_container_system_dns) reply=(
+      'create:create a local DNS domain for containers (requires admin)'
+      'delete:delete a local DNS domain (requires admin)'
+      'list:list local DNS domains'
+    ) ;;
+    (_container_system_kernel) reply=(
+      'set:set the default kernel'
+    ) ;;
+    (_container_system_property) reply=(
+      'list:list system properties'
+    ) ;;
+    (*) reply=() ;;
+  esac
+}
+
+# Completes a command group: its subcommand names, then dispatches to
+# <prefix>_<subcommand> for the subcommand's own arguments.
+# usage: __container_group <prefix> <description>
+(( $+functions[__container_group] )) ||
+__container_group() {
+  local prefix=$1 descr=$2 cmd
+  local curcontext=$curcontext state state_descr line ret=1
+  local -A opt_args
+  local -a reply
+
+  _arguments -C -s -S : $common \
+    '(-): :->command' \
+    '(-)*:: :->argument' && ret=0
+
+  case $state in
+    (command)
+      __container_commands $prefix
+      _describe -t commands "$descr command" reply && ret=0
+      ;;
+    (argument)
+      cmd=${__container_aliases[$words[1]]:-$words[1]}
+      curcontext=${curcontext%:*:*}:${${prefix#_}//_/-}-$cmd:
+      if (( $+functions[${prefix}_$cmd] )); then
+        _call_function ret ${prefix}_$cmd
+      else
+        _message "unknown $descr command: $words[1]"
+      fi
+      ;;
+  esac
+  return ret
+}
+
+# --- shared option sets ----------------------------------------------------
+
+local -a common=(
+  '--debug[enable debug output]'
+  '(- *)--version[show the version]'
+  '(- *)'{-h,--help}'[show help information]'
+)
+
+local -a formats=( '--format=[output format]:format:(json table yaml toml)' )
+
+local -a process_opts=(
+  '*'{-e,--env=}'[set environment variable (key=value, or key to inherit from host)]:environment variable:_parameters -g "*export*" -qS='
+  '*--env-file=[read environment variables from a file]:env file:_files'
+  '--gid=[group ID for the process]:gid: '
+  '(-i --interactive)'{-i,--interactive}'[keep stdin open even if not attached]'
+  '(-t --tty)'{-t,--tty}'[open a TTY with the process]'
+  '(-u --user)'{-u,--user=}'[user for the process (name|uid\[\:gid\])]:user: '
+  '--uid=[user ID for the process]:uid: '
+  '(-w --workdir --cwd)'{-w,--workdir=,--cwd=}'[initial working directory inside the container]:directory in container: '
+  '*--ulimit=[set resource limit (type=soft\[\:hard\])]:limit:__container_ulimit'
+)
+
+local -a dns_opts=(
+  '*--dns=[DNS nameserver IP address]:IP address: '
+  '--dns-domain=[default DNS domain]:domain: '
+  '*--dns-option=[DNS option]:option: '
+  '*--dns-search=[DNS search domain]:domain: '
+)
+
+local -a platform_opts=(
+  '(-a --arch)'{-a,--arch=}'[architecture, if the image targets several]:architecture:(arm64 amd64)'
+  '--os=[OS, if the image targets several]:os:(linux)'
+  '--platform=[platform (os/arch\[/variant\]); overrides --os and --arch]:platform:(linux/arm64 linux/amd64)'
+)
+
+local -a scheme_opts=( '--scheme=[scheme for connecting to the registry]:scheme:(http https)' )
+local -a progress_opts=( '--progress=[progress type]:type:(auto none ansi plain color)' )
+local -a download_opts=( '--max-concurrent-downloads=[maximum number of concurrent downloads]:number: ' )
+
+local capabilities='ALL CAP_AUDIT_CONTROL CAP_AUDIT_READ CAP_AUDIT_WRITE
+  CAP_BLOCK_SUSPEND CAP_BPF CAP_CHECKPOINT_RESTORE CAP_CHOWN CAP_DAC_OVERRIDE
+  CAP_DAC_READ_SEARCH CAP_FOWNER CAP_FSETID CAP_IPC_LOCK CAP_IPC_OWNER CAP_KILL
+  CAP_LEASE CAP_LINUX_IMMUTABLE CAP_MAC_ADMIN CAP_MAC_OVERRIDE CAP_MKNOD
+  CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_BROADCAST CAP_NET_RAW CAP_PERFMON
+  CAP_SETFCAP CAP_SETGID CAP_SETPCAP CAP_SETUID CAP_SYS_ADMIN CAP_SYS_BOOT
+  CAP_SYS_CHROOT CAP_SYS_MODULE CAP_SYS_NICE CAP_SYS_PACCT CAP_SYS_PTRACE
+  CAP_SYS_RAWIO CAP_SYS_RESOURCE CAP_SYS_TIME CAP_SYS_TTY_CONFIG CAP_SYSLOG
+  CAP_WAKE_ALARM'
+
+local -a create_opts=(
+  $process_opts $dns_opts $platform_opts $scheme_opts $download_opts
+  '(-c --cpus)'{-c,--cpus=}'[number of CPUs to allocate]:cpus: '
+  '(-m --memory)'{-m,--memory=}'[amount of memory, with optional K, M, G, T or P suffix]:memory: '
+  "*--cap-add=[add a Linux capability]:capability:($capabilities)"
+  "*--cap-drop=[drop a Linux capability]:capability:($capabilities)"
+  '--cidfile=[write the container ID to a file]:cid file:_files'
+  '(-d --detach)'{-d,--detach}'[run the container and detach from the process]'
+  '--entrypoint=[override the entrypoint of the image]:entrypoint: '
+  '--init[run an init process that forwards signals and reaps processes]'
+  '--init-image=[custom init image]:image:__container_images'
+  '(-k --kernel)'{-k,--kernel=}'[custom kernel path]:kernel:_files'
+  '*--kernel-arg=[append a kernel boot argument]:argument: '
+  '*'{-l,--label=}'[add a key=value label]:label: '
+  '*--masked-path=[\[experimental\] hide a path inside the container (NONE clears)]:path in container: '
+  '*--mount=[add a mount (type=,source=,target=,readonly)]:mount:__container_mount_spec'
+  '--name=[use the given name as the container ID]:name: '
+  '*--network=[attach to a network (name\[,mac=..\]\[,mtu=..\])]:network:__container_networks'
+  '--no-dns[do not configure DNS in the container]'
+  '*'{-p,--publish=}'[publish a port (\[host-ip\:\]host-port\:container-port\[/protocol\])]:port spec: '
+  '*--publish-socket=[publish a socket (host_path\:container_path)]:socket spec:__container_socket_spec'
+  "--read-only[mount the container's root filesystem read-only]"
+  '*--read-only-path=[\[experimental\] mark a path inside the container read-only (NONE clears)]:path in container: '
+  '(--rm --remove)'{--rm,--remove}'[remove the container after it stops]'
+  '--rosetta[enable Rosetta in the container]'
+  '--runtime=[runtime handler]:runtime:(container-runtime-linux)'
+  '--ssh[forward the SSH agent socket to the container]'
+  '--shm-size=[size of /dev/shm (e.g. 64M, 1G)]:size: '
+  '*--tmpfs=[add a tmpfs mount at the given path]:path in container: '
+  '--virtualization[expose virtualization capabilities to the container]'
+  '*'{-v,--volume=}'[bind mount a volume (source\:target)]:volume:__container_volume_spec'
+)
+
+# Arguments after the image (create/run) or container (exec) are passed to the
+# process inside the container, so options stop being completed there.
+local -a passthrough=( '*::command and arguments in container: ' )
+
+local -A __container_aliases=(
+  cp copy  rm delete  ls list
+  i image  m machine  n network  r registry  s system  v volume
+)
+
+# --- top-level containers commands -----------------------------------------
+
+(( $+functions[_container_clean] )) ||
+_container_clean() {
+  _arguments -s -S : $common '*:container:__container_running_containers'
+}
+
+(( $+functions[_container_copy] )) ||
+_container_copy() {
+  _arguments -s -S : $common \
+    '1:source (container\:path or local path):__container_copy_path' \
+    '2:destination (container\:path or local path):__container_copy_path'
+}
+
+(( $+functions[_container_create] )) ||
+_container_create() {
+  _arguments -s -S -A '-*' : $common $create_opts \
+    '1:image:__container_images' $passthrough
+}
+
+(( $+functions[_container_run] )) ||
+_container_run() {
+  _arguments -s -S -A '-*' : $common $create_opts $progress_opts \
+    '1:image:__container_images' $passthrough
+}
+
+(( $+functions[_container_delete] )) ||
+_container_delete() {
+  _arguments -s -S : $common \
+    '(-a --all *)'{-a,--all}'[delete all containers]' \
+    '(-f --force)'{-f,--force}'[delete containers even if they are running]' \
+    '*:container:__container_containers'
+}
+
+(( $+functions[_container_exec] )) ||
+_container_exec() {
+  _arguments -s -S -A '-*' : $common $process_opts \
+    '(-d --detach)'{-d,--detach}'[run the process and detach from it]' \
+    '1:container:__container_running_containers' $passthrough
+}
+
+(( $+functions[_container_export] )) ||
+_container_export() {
+  _arguments -s -S : $common \
+    '(-o --output)'{-o,--output=}'[output tar archive (defaults to stdout)]:output file:_files' \
+    '1:container:__container_containers'
+}
+
+(( $+functions[_container_inspect] )) ||
+_container_inspect() {
+  _arguments -s -S : $common '*:container:__container_containers'
+}
+
+(( $+functions[_container_kill] )) ||
+_container_kill() {
+  _arguments -s -S : $common \
+    '(-a --all *)'{-a,--all}'[kill or signal all running containers]' \
+    '(-s --signal)'{-s,--signal=}'[signal to send (default KILL)]:signal:_signals' \
+    '*:container:__container_running_containers'
+}
+
+(( $+functions[_container_list] )) ||
+_container_list() {
+  _arguments -s -S : $common $formats \
+    '(-a --all)'{-a,--all}'[include containers that are not running]' \
+    '(-q --quiet)'{-q,--quiet}'[only output the container ID]'
+}
+
+(( $+functions[_container_logs] )) ||
+_container_logs() {
+  _arguments -s -S : $common \
+    '--boot[display the boot log instead of stdio]' \
+    '(-f --follow)'{-f,--follow}'[follow log output]' \
+    '-n[number of lines to show from the end of the logs]:lines: ' \
+    '1:container:__container_containers'
+}
+
+(( $+functions[_container_start] )) ||
+_container_start() {
+  _arguments -s -S : $common \
+    '(-a --attach)'{-a,--attach}'[attach stdout/stderr]' \
+    '(-i --interactive)'{-i,--interactive}'[attach stdin]' \
+    '1:container:__container_stopped_containers'
+}
+
+(( $+functions[_container_stats] )) ||
+_container_stats() {
+  _arguments -s -S : $common $formats \
+    '--no-stream[only print the first result instead of streaming]' \
+    '*:container:__container_running_containers'
+}
+
+(( $+functions[_container_stop] )) ||
+_container_stop() {
+  _arguments -s -S : $common \
+    '(-a --all *)'{-a,--all}'[stop all running containers]' \
+    '(-s --signal)'{-s,--signal=}'[signal to send to the containers]:signal:_signals' \
+    '(-t --time)'{-t,--time=}'[seconds to wait before killing the containers]:seconds: ' \
+    '*:container:__container_running_containers'
+}
+
+(( $+functions[_container_prune] )) ||
+_container_prune() {
+  _arguments -s -S : $common
+}
+
+(( $+functions[_container_build] )) ||
+_container_build() {
+  _arguments -s -S : $common $dns_opts \
+    '*'{-a,--arch=}'[add an architecture to the build]:architecture:(arm64 amd64)' \
+    '*--build-arg=[set a build-time variable]:key=value: ' \
+    '(-c --cpus)'{-c,--cpus=}'[number of CPUs for the builder container]:cpus: ' \
+    '(-f --file)'{-f,--file=}'[path to Dockerfile]:Dockerfile:_files' \
+    '*'{-l,--label=}'[set a label]:key=value: ' \
+    '(-m --memory)'{-m,--memory=}'[builder container memory, with optional K, M, G, T or P suffix]:memory: ' \
+    '--no-cache[do not use cache]' \
+    '*'{-o,--output=}'[output configuration (type=<oci|tar|local>\[,dest=\])]:output:_values -s , output "type:type:(oci tar local)" "dest:destination:_files"' \
+    '*--os=[add an OS to the build]:os:(linux)' \
+    '*--platform=[add a platform (os/arch\[/variant\])]:platform:(linux/arm64 linux/amd64)' \
+    '--progress=[progress type]:type:(auto plain tty)' \
+    '(-q --quiet)'{-q,--quiet}'[suppress build output]' \
+    '*--secret=[build-time secret (id=key\[,env=VAR|,src=path\])]:secret: ' \
+    '--ssh=[forward SSH agent authentication]:ssh:(default)' \
+    '*'{-t,--tag=}'[name for the built image]:name:__container_images' \
+    '--target=[target build stage]:stage: ' \
+    '--vsock-port=[builder shim vsock port]:port: ' \
+    '--pull[pull the latest image]' \
+    '1:build context directory:_directories'
+}
+
+(( $+functions[_container_help] )) ||
+_container_help() {
+  local prefix=_container cmd
+  local -a reply
+  local -i i
+  # Walk the subcommands already given (after "help") to find the current group.
+  for (( i = 2; i < CURRENT; i++ )); do
+    cmd=${__container_aliases[$words[i]]:-$words[i]}
+    __container_commands ${prefix}_$cmd
+    (( $#reply )) || return 1
+    prefix+=_$cmd
+  done
+  __container_commands $prefix
+  _describe -t commands 'container command' reply
+}
+
+# --- container image -------------------------------------------------------
+
+(( $+functions[_container_image] )) ||
+_container_image() { __container_group _container_image image }
+
+(( $+functions[_container_image_delete] )) ||
+_container_image_delete() {
+  _arguments -s -S : $common \
+    '(-a --all *)'{-a,--all}'[delete all images]' \
+    '(-f --force)'{-f,--force}'[ignore errors for images that are not found]' \
+    '*:image:__container_images'
+}
+
+(( $+functions[_container_image_inspect] )) ||
+_container_image_inspect() {
+  _arguments -s -S : $common '*:image:__container_images'
+}
+
+(( $+functions[_container_image_list] )) ||
+_container_image_list() {
+  _arguments -s -S : $common $formats \
+    '(-q --quiet)'{-q,--quiet}'[only output the image name]' \
+    '(-v --verbose)'{-v,--verbose}'[verbose output]'
+}
+
+(( $+functions[_container_image_load] )) ||
+_container_image_load() {
+  _arguments -s -S : $common \
+    '(-i --input)'{-i,--input=}'[path to the image tar archive]:archive:_files -g "*.tar(-.)"' \
+    '(-f --force)'{-f,--force}'[load images even if the archive contains invalid files]'
+}
+
+(( $+functions[_container_image_prune] )) ||
+_container_image_prune() {
+  _arguments -s -S : $common \
+    '(-a --all)'{-a,--all}'[remove all unused images, not just dangling ones]'
+}
+
+(( $+functions[_container_image_pull] )) ||
+_container_image_pull() {
+  _arguments -s -S : $common $scheme_opts $progress_opts $download_opts $platform_opts \
+    '1:image reference:__container_images'
+}
+
+(( $+functions[_container_image_push] )) ||
+_container_image_push() {
+  _arguments -s -S : $common $scheme_opts $progress_opts $platform_opts \
+    '1:image reference:__container_images'
+}
+
+(( $+functions[_container_image_save] )) ||
+_container_image_save() {
+  _arguments -s -S : $common $platform_opts \
+    '(-o --output)'{-o,--output=}'[pathname for the saved image]:output file:_files' \
+    '*:image:__container_images'
+}
+
+(( $+functions[_container_image_tag] )) ||
+_container_image_tag() {
+  _arguments -s -S : $common \
+    '1:source image:__container_images' \
+    '2:new image reference: '
+}
+
+# --- container registry ----------------------------------------------------
+
+(( $+functions[_container_registry] )) ||
+_container_registry() { __container_group _container_registry registry }
+
+(( $+functions[_container_registry_login] )) ||
+_container_registry_login() {
+  _arguments -s -S : $common $scheme_opts \
+    '--password-stdin[take the password from stdin]' \
+    '(-u --username)'{-u,--username=}'[registry user name]:user name: ' \
+    '1:registry server:_hosts'
+}
+
+(( $+functions[_container_registry_logout] )) ||
+_container_registry_logout() {
+  _arguments -s -S : $common '1:registry:__container_registries'
+}
+
+(( $+functions[_container_registry_list] )) ||
+_container_registry_list() {
+  _arguments -s -S : $common $formats \
+    '(-q --quiet)'{-q,--quiet}'[only output the registry hostname]'
+}
+
+# --- container machine -----------------------------------------------------
+
+(( $+functions[_container_machine] )) ||
+_container_machine() { __container_group _container_machine machine }
+
+(( $+functions[_container_machine_create] )) ||
+_container_machine_create() {
+  _arguments -s -S : $common $platform_opts $scheme_opts $progress_opts $download_opts \
+    '(-n --name)'{-n,--name=}'[name for the container machine]:name: ' \
+    '--set-default[make this the default container machine]' \
+    '--no-boot[create the container machine without booting it]' \
+    '--cpus=[number of virtual CPUs]:cpus: ' \
+    '--memory=[memory allocation (e.g. 2G, 8G)]:memory: ' \
+    "--home-mount=[user's home directory mount option]:mode:(ro rw none)" \
+    '--virtualization[enable nested virtualization]' \
+    '--kernel=[path to a custom kernel binary]:kernel:_files' \
+    '1:image:__container_images'
+}
+
+(( $+functions[_container_machine_delete] )) ||
+_container_machine_delete() {
+  _arguments -s -S : $common '1:container machine:__container_machines'
+}
+
+(( $+functions[_container_machine_inspect] )) ||
+_container_machine_inspect() {
+  _arguments -s -S : $common '1:container machine:__container_machines'
+}
+
+(( $+functions[_container_machine_list] )) ||
+_container_machine_list() {
+  _arguments -s -S : $common \
+    '--format=[output format]:format:(json table)' \
+    '(-q --quiet)'{-q,--quiet}'[only output the container machine ID]'
+}
+
+(( $+functions[_container_machine_logs] )) ||
+_container_machine_logs() {
+  _arguments -s -S : $common \
+    '--boot[display the boot log instead of stdio]' \
+    '(-f --follow)'{-f,--follow}'[follow log output]' \
+    '-n[number of lines to show from the end of the logs]:lines: ' \
+    '1:container machine:__container_machines'
+}
+
+(( $+functions[_container_machine_run] )) ||
+_container_machine_run() {
+  _arguments -s -S -A '-*' : $common $process_opts \
+    '(-n --name)'{-n,--name=}'[container machine (default if not given)]:container machine:__container_machines' \
+    '(-d --detach)'{-d,--detach}'[run the process and detach from it]' \
+    '--root[run as root instead of the host user]' \
+    '*::command and arguments in machine: '
+}
+
+(( $+functions[_container_machine_set] )) ||
+_container_machine_set() {
+  _arguments -s -S : $common \
+    '(-n --name)'{-n,--name=}'[container machine (default if not given)]:container machine:__container_machines' \
+    '*:setting:__container_machine_settings'
+}
+
+(( $+functions[_container_machine_set-default] )) ||
+_container_machine_set-default() {
+  _arguments -s -S : $common '1:container machine:__container_machines'
+}
+
+(( $+functions[_container_machine_stop] )) ||
+_container_machine_stop() {
+  _arguments -s -S : $common '1:container machine:__container_machines'
+}
+
+# --- container volume ------------------------------------------------------
+
+(( $+functions[_container_volume] )) ||
+_container_volume() { __container_group _container_volume volume }
+
+(( $+functions[_container_volume_create] )) ||
+_container_volume_create() {
+  _arguments -s -S : $common \
+    '*--label=[set metadata for the volume]:key=value: ' \
+    '*--opt=[set a driver-specific option]:key=value: ' \
+    '-s[size in bytes, with optional K, M, G, T or P suffix]:size: ' \
+    '1:volume name: '
+}
+
+(( $+functions[_container_volume_delete] )) ||
+_container_volume_delete() {
+  _arguments -s -S : $common \
+    '(-a --all *)'{-a,--all}'[delete all volumes]' \
+    '*:volume:__container_volumes'
+}
+
+(( $+functions[_container_volume_list] )) ||
+_container_volume_list() {
+  _arguments -s -S : $common $formats \
+    '(-q --quiet)'{-q,--quiet}'[only output the volume name]'
+}
+
+(( $+functions[_container_volume_inspect] )) ||
+_container_volume_inspect() {
+  _arguments -s -S : $common '*:volume:__container_volumes'
+}
+
+(( $+functions[_container_volume_prune] )) ||
+_container_volume_prune() {
+  _arguments -s -S : $common
+}
+
+# --- container builder -----------------------------------------------------
+
+(( $+functions[_container_builder] )) ||
+_container_builder() { __container_group _container_builder builder }
+
+(( $+functions[_container_builder_start] )) ||
+_container_builder_start() {
+  _arguments -s -S : $common $dns_opts \
+    '(-c --cpus)'{-c,--cpus=}'[number of CPUs for the builder container]:cpus: ' \
+    '(-m --memory)'{-m,--memory=}'[builder container memory, with optional K, M, G, T or P suffix]:memory: '
+}
+
+(( $+functions[_container_builder_status] )) ||
+_container_builder_status() {
+  _arguments -s -S : $common $formats \
+    '(-q --quiet)'{-q,--quiet}'[only output the container ID]'
+}
+
+(( $+functions[_container_builder_stop] )) ||
+_container_builder_stop() {
+  _arguments -s -S : $common
+}
+
+(( $+functions[_container_builder_delete] )) ||
+_container_builder_delete() {
+  _arguments -s -S : $common \
+    '(-f --force)'{-f,--force}'[delete the builder even if it is running]'
+}
+
+# --- container network -----------------------------------------------------
+
+(( $+functions[_container_network] )) ||
+_container_network() { __container_group _container_network network }
+
+(( $+functions[_container_network_create] )) ||
+_container_network_create() {
+  _arguments -s -S : $common \
+    '--internal[restrict to a host-only network]' \
+    '*--label=[set metadata for the network]:key=value: ' \
+    '*--option=[set a plugin-specific option]:key=value: ' \
+    '--plugin=[plugin used to create the network]:plugin: ' \
+    '--subnet=[IPv4 subnet for the network]:subnet (CIDR): ' \
+    '--subnet-v6=[IPv6 prefix for the network]:prefix (CIDR): ' \
+    '1:network name: '
+}
+
+(( $+functions[_container_network_delete] )) ||
+_container_network_delete() {
+  _arguments -s -S : $common \
+    '(-a --all *)'{-a,--all}'[delete all networks]' \
+    '*:network:__container_networks'
+}
+
+(( $+functions[_container_network_list] )) ||
+_container_network_list() {
+  _arguments -s -S : $common $formats \
+    '(-q --quiet)'{-q,--quiet}'[only output the network name]'
+}
+
+(( $+functions[_container_network_inspect] )) ||
+_container_network_inspect() {
+  _arguments -s -S : $common '*:network:__container_networks'
+}
+
+(( $+functions[_container_network_prune] )) ||
+_container_network_prune() {
+  _arguments -s -S : $common
+}
+
+# --- container system ------------------------------------------------------
+
+(( $+functions[_container_system] )) ||
+_container_system() { __container_group _container_system system }
+
+(( $+functions[_container_system_df] )) ||
+_container_system_df() {
+  _arguments -s -S : $common $formats
+}
+
+(( $+functions[_container_system_dns] )) ||
+_container_system_dns() { __container_group _container_system_dns 'system dns' }
+
+(( $+functions[_container_system_dns_create] )) ||
+_container_system_dns_create() {
+  _arguments -s -S : $common \
+    '--localhost=[IP address to redirect to localhost]:IP address: ' \
+    '1:domain name: '
+}
+
+(( $+functions[_container_system_dns_delete] )) ||
+_container_system_dns_delete() {
+  _arguments -s -S : $common '1:domain:__container_dns_domains'
+}
+
+(( $+functions[_container_system_dns_list] )) ||
+_container_system_dns_list() {
+  _arguments -s -S : $common $formats \
+    '(-q --quiet)'{-q,--quiet}'[only output the domain]'
+}
+
+(( $+functions[_container_system_kernel] )) ||
+_container_system_kernel() { __container_group _container_system_kernel 'system kernel' }
+
+(( $+functions[_container_system_kernel_set] )) ||
+_container_system_kernel_set() {
+  _arguments -s -S : $common \
+    '--arch=[architecture of the kernel binary]:architecture:(amd64 arm64)' \
+    '--binary=[path to the kernel file (or archive member with --tar)]:kernel:_files' \
+    '--force[overwrite an existing kernel with the same name]' \
+    '--recommended[download and install the recommended kernel (overrides other flags)]' \
+    '--tar=[filesystem path or URL of a tar archive containing a kernel]:archive:_files' \
+    '--digest=[expected digest of the tar archive (sha256\:<hex>)]:digest: '
+}
+
+(( $+functions[_container_system_logs] )) ||
+_container_system_logs() {
+  _arguments -s -S : $common \
+    '(-f --follow)'{-f,--follow}'[follow log output]' \
+    '--last=[fetch logs from this long ago (<number>\[m|h|d\])]:period: '
+}
+
+(( $+functions[_container_system_property] )) ||
+_container_system_property() { __container_group _container_system_property 'system property' }
+
+(( $+functions[_container_system_property_list] )) ||
+_container_system_property_list() {
+  _arguments -s -S : $common '--format=[output format]:format:(json toml)'
+}
+
+(( $+functions[_container_system_start] )) ||
+_container_system_start() {
+  _arguments -s -S : $common \
+    '(-a --app-root)'{-a,--app-root=}'[root directory for application data]:directory:_directories' \
+    '--install-root=[root directory for application executables and plugins]:directory:_directories' \
+    '--log-root=[root directory for log data (macOS log facility if unset)]:directory:_directories' \
+    '(--disable-kernel-install)--enable-kernel-install[install the default kernel without prompting]' \
+    '(--enable-kernel-install)--disable-kernel-install[do not install the default kernel]' \
+    '--timeout=[seconds to wait for the API service to respond]:seconds: '
+}
+
+(( $+functions[_container_system_status] )) ||
+_container_system_status() {
+  _arguments -s -S : $common $formats \
+    '(-p --prefix)'{-p,--prefix=}'[launchd prefix for services]:prefix: '
+}
+
+(( $+functions[_container_system_stop] )) ||
+_container_system_stop() {
+  _arguments -s -S : $common \
+    '(-p --prefix)'{-p,--prefix=}'[launchd prefix for services]:prefix: '
+}
+
+(( $+functions[_container_system_version] )) ||
+_container_system_version() {
+  _arguments -s -S : $common $formats
+}
+
+# --- entry point -----------------------------------------------------------
+
+local _container_bin=$words[1]
+__container_group _container container
